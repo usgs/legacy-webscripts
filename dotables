@@ -1,0 +1,1613 @@
+#! /usr/bin/perl -T
+#
+# DOTABLES
+#
+#  This program generates tables of dissolved oxygen (DO) solubility values
+#  and (or) salinity correction factors over a range of user-specified values
+#  for water temperature, barometric pressure, and salinity or specific
+#  conductance. In addition to generating tables, this program can compute
+#  a single-value of oxygen solubility and percent saturation for a specific
+#  instance of temperature, pressure, and salinity.
+#
+# $Id: dotables,v 3.6 2018/08/27 15:00:00 sarounds Exp $
+#
+# Version history:
+#
+#  Version 3.6 -- 2018/08/27  (Stewart Rounds)
+#    Converted input parsing to the CGI module.  Updated http to https.
+#    This change has no effect on the calculations.
+#
+#  Version 3.5 -- 2013/01/14  (Stewart Rounds)
+#    Updated how the required Google Analytics header info is parsed.
+#    Also updated the parsing of the footer so that contact info is visible.
+#    This change has no effect on the calculations.
+#
+#  Version 3.4 -- 2013/01/07  (Stewart Rounds)
+#    Added the required Google Analytics header info to the web pages.
+#    This change has no effect on the calculations.
+#
+#  Version 3.3 -- 2012/01/27  (Stewart Rounds)
+#    Fixed problem in parsing the footer_water.html footer, which includes
+#    internal links that must not be served to the public.  This was done
+#    by enhancing the code in the ParseTemplate subroutine.
+#
+#  Version 3.2 -- 2011/09/12  (Stewart Rounds)
+#    Fixed a bug in the routines that handled barometric pressure in units
+#    of inches of mercury (in Hg).  Results from versions 3.0 and 3.1 in
+#    those units were erroneous.
+#
+#  Version 3.1 -- 2011/08/29  (Stewart Rounds)
+#    Minor change to the tabled html output in an attempt to improve the
+#    printing of tables from a web browser.  The html now uses the <thead>
+#    and <tbody> tags.
+#
+#  Version 3.0 -- 2011/05/13  (Stewart Rounds)
+#    Major upgrade.  Discarded the Weiss (1970) equations in favor of
+#    the Benson and Krause (1980, 1984) equations.  See the Office of Water
+#    Quality Tech Memo.  Added a single-value computation capability.
+#    Added javascript functions to the front-end web page to compute
+#    single-value oxygen solubility and percent saturation as well as error
+#    checking and unit conversions.  Added the ability to input in different
+#    units for water temperature, barometric pressure, and salinity.  Added
+#    new output formats that are friendlier for importing into spreadsheets.
+#
+#  Version 2.1 -- 2008/07/16  (David Boldt)
+#    Minor formatting adjustment for the column labels to prevent them from
+#    abutting each other, which occurred with certain settings. 
+#
+#  Version 2.0 -- 2008/07/16  (David Boldt)
+#    Some streamlining of the formatting code. 
+#
+#  Version 1.3 -- 2001/08/28  (Michele Crouse and David Boldt)
+#    Added security checks by turning on perl taint mode and adding dboldt's
+#    sanitize function.  Removed deprecated code.
+#
+#  Version 1.2 -- 1999/03/16  (Michele Crouse and David Boldt)
+#    Improved efficiency of code: modified code to only perform calculations
+#    for temperatures within valid range (previously, calculations were
+#    done for all temperatures in range specified by user but only values
+#    for temperatures within valid range were displayed in table).
+#    Eliminated redundant calculations performed if maximum specific
+#    conductance entered exceeded 76,000 and added warning message regarding
+#    exceeding maximum.  Corrected problem with code in handling starting
+#    temperature or temperature increment with fractional part.  Corrected
+#    off-by-one error in determining number of columns to print in salinity
+#    correction factors table.  Improved error checking and handling.
+#
+#  Version 1.1 -- 1998/03/02  (Michele Crouse and David Boldt)
+#    Modified code to insert commas in atmospheric pressure and specific
+#    conductance values greater than 999.
+#
+#  Version 1.0 -- 1997/10/20  (David Boldt and Michele Crouse)
+#    Original web implementation.  Conversion to Perl from Fortran on
+#    1997/07/23.  Range options added.  Better formatting code added.
+#    Commented out output of HTML which presented input parameter fields
+#    following generated tables.  Modified tables to follow publication
+#    guidelines.  Fixed syntax errors.
+#
+#  Version 0.x -- 1981/12/19
+#    Pre-Internet Fortran version prepared, entered, and tested by
+#    R. Middelburg, D.V. Maddy, and L. Jackson, respectively.
+#    (formerly Amdahl program K321A)
+
+#
+# Define some paths and perl taint mode security settings
+#
+$ENV{'CDPATH'}  = '';
+$ENV{'ENV'}     = '';
+$ENV{'IFS'}     = ' '       if ( ! defined( $ENV{'IFS'} ) || $ENV{'IFS'} ne ' ');
+$ENV{'SHELL'}   = '/bin/sh' if ( $ENV{'SHELL'} );
+$ENV{'PATH'}    = '/bin:/usr/bin';
+
+#
+# Get some general settings and variables.
+#
+&EnvSettings;
+
+#
+# Get input using the CGI module, and sanitize/filter those inputs.
+#
+use CGI;
+$CGI::POST_MAX = 1024 * 1024 * 1;  # max 1MB posts
+$CGI::DISABLE_UPLOADS = 1;         # no uploads
+$ok_txt = 'a-zA-Z0-9_';            # acceptable characters for input
+$ok_num = '-0-9.eE+';              # acceptable characters for input
+
+$query  = CGI->new;
+
+($request_type = scalar $query->param('request_type')) =~ s/[^$ok_txt]//g;
+
+if ( $request_type eq "single_value" ) {
+    ($wt_input = scalar $query->param('wt'))       =~ s/[^$ok_num]//g;
+    ($wt_units = scalar $query->param('wt_units')) =~ s/[^$ok_txt]//g;
+    ($bp_input = scalar $query->param('bp'))       =~ s/[^$ok_num]//g;
+    ($bp_units = scalar $query->param('bp_units')) =~ s/[^$ok_txt]//g;
+    ($sc       = scalar $query->param('sc'))       =~ s/[^$ok_num]//g;
+    ($sc_units = scalar $query->param('sc_units')) =~ s/[^$ok_txt]//g;
+    ($ox       = scalar $query->param('ox'))       =~ s/[^$ok_num]//g;
+
+} elsif ( $request_type eq "do_table" ) {
+    ($wt_units = scalar $query->param('wt_units')) =~ s/[^$ok_txt]//g;
+    ($wt_min   = scalar $query->param('wt_min'))   =~ s/[^$ok_num]//g;
+    ($wt_inc   = scalar $query->param('wt_inc'))   =~ s/[^$ok_num]//g;
+    ($wt_max   = scalar $query->param('wt_max'))   =~ s/[^$ok_num]//g;
+    ($bp_units = scalar $query->param('bp_units')) =~ s/[^$ok_txt]//g;
+    ($bp_min   = scalar $query->param('bp_min'))   =~ s/[^$ok_num]//g;
+    ($bp_inc   = scalar $query->param('bp_inc'))   =~ s/[^$ok_num]//g;
+    ($bp_max   = scalar $query->param('bp_max'))   =~ s/[^$ok_num]//g;
+    ($sc_units = scalar $query->param('sc_units')) =~ s/[^$ok_txt]//g;
+    ($sc       = scalar $query->param('sc'))       =~ s/[^$ok_num]//g;
+    ($do_prec  = scalar $query->param('do_prec'))  =~ s/[^$ok_num]//g;
+    ($fmt      = scalar $query->param('filefmt'))  =~ s/[^$ok_txt]//g;
+    $wt_min_sav = $wt_min;
+    $wt_max_sav = $wt_max;
+    $bp_min_sav = $bp_min;
+    $bp_max_sav = $bp_max;
+
+} elsif ( $request_type eq "sf_table" ) {
+    ($wt_units = scalar $query->param('wt_units')) =~ s/[^$ok_txt]//g;
+    ($wt_min   = scalar $query->param('wt_min'))   =~ s/[^$ok_num]//g;
+    ($wt_inc   = scalar $query->param('wt_inc'))   =~ s/[^$ok_num]//g;
+    ($wt_max   = scalar $query->param('wt_max'))   =~ s/[^$ok_num]//g;
+    ($sc_units = scalar $query->param('sc_units')) =~ s/[^$ok_txt]//g;
+    ($sc_min   = scalar $query->param('sc_min'))   =~ s/[^$ok_num]//g;
+    ($sc_inc   = scalar $query->param('sc_inc'))   =~ s/[^$ok_num]//g;
+    ($sc_max   = scalar $query->param('sc_max'))   =~ s/[^$ok_num]//g;
+    ($sf_prec  = scalar $query->param('sf_prec'))  =~ s/[^$ok_num]//g;
+    ($fmt      = scalar $query->param('filefmt'))  =~ s/[^$ok_txt]//g;
+    $wt_min_sav = $wt_min;
+    $wt_max_sav = $wt_max;
+
+} else {
+    $msg = "Sorry, but your request could not be processed.";
+    &exit_gracefully("do_table", $msg);
+}
+
+
+#
+# Assume certain unit systems and output formats if not specified.
+#
+$wt_units = "degC" if ( ! defined( $wt_units ) || $wt_units ne "degF" );
+$sc_units = "sc"   if ( ! defined( $sc_units ) || $sc_units ne "sal"  );
+$bp_units = "mmHg" if ( ! defined( $bp_units ) ||
+                        &list_match($bp_units, ("mmHg", "inHg", "mbar", "kPa", "atm")) < 0 );
+$fmt      = "html" if ( ! defined( $fmt ) ||
+                        &list_match($fmt, ("html", "csv", "tab")) < 0 );
+
+
+#
+# Convert units to deg. C, atm, and permil for purposes of error checking.
+# Report an error if present.
+#
+$msg = "";
+if ( $request_type eq "single_value" ) {
+    $wt = $wt_input;
+    $bp = $bp_input;
+
+#   Check for undefined inputs and report any errors.
+    if ( ! defined( $wt ) || ! defined( $bp ) || ! defined( $sc ) ) {
+        $msg = "INPUT ERROR-- Please input values for water temperature, "
+             . "barometric pressure, and salinity or specific conductance.";
+        &exit_gracefully($request_type, $msg);
+    }
+
+#   Convert units for testing of valid ranges.
+    $wt  = &wt2degC($wt, $wt_units);  # convert wt to deg C
+    $bp  = &bp2atm($bp, $bp_units);   # convert bp to atm
+    $sal = &sc2sal($sc, $sc_units);   # convert sc to salinity
+    $ox  = 0. if ( $ox < 0 );
+
+#   Check for values outside of valid ranges and report any errors.
+    if ( $wt < 0 || $wt > 40 ) {
+        $msg = "ERROR-- The water temperature input must be in the range of "
+             . "0-40 degrees Celsius or 32-104 degrees Fahrenheit.";
+
+    } elsif ( $bp < 0.5 || $bp > 1.1 ) {
+        $msg = "ERROR-- The barometric pressure input must be in the range of "
+             . "0.5-1.1 atmospheres or 380-836 mm Hg or 14.97-32.91 in Hg or "
+             . "507-1114 millibars or 51-112 kiloPascals.";
+
+    } elsif ( $sal < 0 || $sal > 40 ) {
+        $msg = "ERROR-- The salinity or specific conductance input must be in the range of "
+             . "0-40 permil (&permil;) salinity or 0-59118 &micro;S/cm specific conductance.";
+    }
+    if ( $msg ne "" ) {  # One error complaint at a time.
+        &exit_gracefully($request_type, $msg);
+    }
+
+
+} elsif ( $request_type eq "do_table" ) {
+
+#   Check for undefined or ill-defined inputs.  Report certin errors.
+    $prec_do = ($do_prec == 2) ? 2 : 1;
+    $sc      = 0 if ( ! defined( $sc ) );
+   
+    if ( ! defined( $wt_min ) || ! defined( $wt_inc ) || ! defined( $wt_max ) ) {
+        $msg = "INPUT ERROR-- Please input values for the water temperature "
+             . "minimum, increment, and maximum for the table.";
+        &exit_gracefully($request_type, $msg);
+    }
+    if ( ! defined( $bp_min ) || ! defined( $bp_inc ) || ! defined( $bp_max ) ) {
+        $msg = "INPUT ERROR-- Please input values for the barometric pressure "
+             . "minimum, increment, and maximum for the table.";
+        &exit_gracefully($request_type, $msg);
+    }
+
+#   Estimate the number of data columns.  Do this in native units.
+    if ( $bp_inc > 0 ) {
+        $ncols = int(($bp_max-$bp_min)/$bp_inc)+1;
+    }
+
+#   Convert units for testing of valid ranges.
+    $wt_min = &wt2degC($wt_min, $wt_units);  # convert wt to deg C
+    $wt_max = &wt2degC($wt_max, $wt_units);
+    $bp_min = &bp2atm($bp_min, $bp_units);   # convert bp to atm
+    $bp_max = &bp2atm($bp_max, $bp_units);
+    $sal    = &sc2sal($sc, $sc_units);       # convert sc to salinity
+
+#   Check for values outside of valid ranges and report any errors.
+    if ( $wt_min < 0 || $wt_min > 40 || $wt_max < 0 || $wt_max > 40 ) {
+        $msg = "ERROR-- The water temperature for the table must be in the range of "
+             . "0-40 degrees Celsius or 32-104 degrees Fahrenheit.";
+
+    } elsif ( $wt_min >= $wt_max ) {
+        $msg = "ERROR-- The water temperature minimum must be less than the "
+             . "water temperature maximum.";
+
+    } elsif ( $wt_inc < 0.01 ) {
+        $msg = "ERROR-- The water temperature increment for the table "
+             . "must be at least 0.01 degrees.";
+
+    } elsif ( $bp_min < 0.5 || $bp_min > 1.1 || $bp_max < 0.5 || $bp_max > 1.1 ) {
+        $msg = "ERROR-- The barometric pressure for the table must be in the range of "
+             . "0.5-1.1 atmospheres or 380-836 mm Hg or 14.97-32.91 in Hg or "
+             . "507-1114 millibars or 51-112 kiloPascals.";
+
+    } elsif ( $bp_min >=  $bp_max ) {
+        $msg = "ERROR-- The barometric pressure minimum must be less than the "
+             . "barometric pressure maximum.";
+
+    } elsif ( $bp_inc < 0.01 ) {
+        $msg = "ERROR-- The barometric pressure increment for the table "
+             . "must be at least 0.01.";
+
+    } elsif ( $sal < 0 || $sal > 40 ) {
+        $msg = "ERROR-- The salinity or specific conductance input must be in the range of "
+             . "0-40 permil (&permil;) salinity or 0-59118 &micro;S/cm specific conductance.";
+
+    } elsif ( $ncols > 500 ) {
+        $msg = "ERROR-- The maximum number of data columns for the table is 500. "
+             . "Try increasing the barometric pressure increment.";
+    }
+    if ( $msg ne "" ) {  # One error complaint at a time.
+        &exit_gracefully($request_type, $msg);
+    }
+
+#   Restore modified values to original units. Tables will be reported out in user units.
+    $wt_min = $wt_min_sav;
+    $wt_max = $wt_max_sav;
+    $bp_min = $bp_min_sav;
+    $bp_max = $bp_max_sav;
+
+
+} elsif ( $request_type eq "sf_table" ) {
+
+#   Check for undefined or ill-defined inputs.  Report certin errors.
+    $prec_sf = ($sf_prec == 4) ? 4 : 3;
+    $bp_units = "atm";
+    $bp       = 1.;
+
+    if ( ! defined( $wt_min ) || ! defined( $wt_inc ) || ! defined( $wt_max ) ) {
+        $msg = "INPUT ERROR-- Please input values for the water temperature "
+             . "minimum, increment, and maximum for the table.";
+        &exit_gracefully($request_type, $msg);
+    }
+    if ( ! defined( $sc_min ) || ! defined( $sc_inc ) || ! defined( $sc_max ) ) {
+        $msg = "INPUT ERROR-- Please input values for the salinity or specific "
+             . "conductance minimum, increment, and maximum for the table.";
+        &exit_gracefully($request_type, $msg);
+    }
+
+#   Estimate the number of data columns.  Do this in native units.
+    if ( $sc_inc > 0 ) {
+        $ncols = int(($sc_max-$sc_min)/$sc_inc)+1;
+    }
+
+#   Convert units for testing of valid ranges.
+    $wt_min  = &wt2degC($wt_min, $wt_units);  # convert wt to deg C
+    $wt_max  = &wt2degC($wt_max, $wt_units);
+    $sal_min = &sc2sal($sc_min, $sc_units);   # convert sc to salinity
+    $sal_max = &sc2sal($sc_max, $sc_units);
+
+#   Check for values outside of valid ranges and report any errors.
+    if ( $wt_min < 0 || $wt_min > 40 || $wt_max < 0 || $wt_max > 40 ) {
+        $msg = "ERROR-- The water temperature for the table must be in the range of "
+             . "0-40 degrees Celsius or 32-104 degrees Fahrenheit.";
+
+    } elsif ( $wt_min >= $wt_max ) {
+        $msg = "ERROR-- The water temperature minimum must be less than the "
+             . "water temperature maximum.";
+
+    } elsif ( $wt_inc < 0.01 ) {
+        $msg = "ERROR-- The water temperature increment for the table "
+             . "must be at least 0.01 degrees.";
+
+    } elsif ( $sal_min < 0 || $sal_min > 40 || $sal_max < 0 || $sal_max > 40 ) {
+        $msg = "ERROR-- The salinity or specific conductance for the table must be in the range of "
+             . "0-40 permil (&permil;) salinity or 0-59118 &micro;S/cm specific conductance.";
+
+    } elsif ( $sal_min >= $sal_max ) {
+        $msg = "ERROR-- The salinity or specific conductance minimum must be less than the "
+             . "salinity or specific conductance maximum.";
+
+    } elsif ( $sc_inc < 0.01 ) {
+        $msg = "ERROR-- The salinity or specific conductance increment for the table "
+             . "must be at least 0.01.";
+
+    } elsif ( $ncols > 500 ) {
+        $msg = "ERROR-- The maximum number of data columns for the table is 500. "
+             . "Try increasing the increment for salinity or specific conductance.";
+    }
+    if ( $msg ne "" ) {  # One error complaint at a time.
+        &exit_gracefully($request_type, $msg);
+    }
+
+#   Restore modified values to original units -- Tables will be reported out in user units.
+    $wt_min = $wt_min_sav;
+    $wt_max = $wt_max_sav;
+}
+
+
+#
+# If the request was to perform the single-value computation,
+# then do that, print the output, and exit.
+#
+if ( $request_type eq "single_value" ) {
+    $sol  = &compute_solubility($wt, $bp, $sal);
+    $sol  = sprintf("%.2f", $sol);
+    $psat = sprintf("%.2f", 100. * $ox / $sol);
+
+    $degC_checked = $degF_checked = "";
+    $sc_checked   = $sal_checked  = "";
+    $mmHg_checked = $inHg_checked = $mbar_checked = "";
+    $kPa_checked  = $atm_checked  = "";
+
+    if ( $wt_units eq "degC" ) {
+        $show_wt_units = " \&deg;C";
+        $degC_checked  = " selected";
+    } else {
+        $show_wt_units = " \&deg;F";
+        $degF_checked  = " selected";
+    }
+    if ( $bp_units eq "mmHg" ) {
+        $show_bp_units = " mm Hg";
+        $mmHg_checked  = " selected";
+    } elsif ( $bp_units eq "inHg" ) {
+        $show_bp_units = " in Hg";
+        $inHg_checked  = " selected";
+    } elsif ( $bp_units eq "mbar" ) {
+        $show_bp_units = " mbar";
+        $mbar_checked  = " selected";
+    } elsif ( $bp_units eq "kPa" ) {
+        $show_bp_units = " kPa";
+        $kPa_checked   = " selected";
+    } else {
+        $show_bp_units = " atm";
+        $atm_checked   = " selected";
+    }
+    if ( $sc_units eq "sc" ) {
+        $show_sc_type  = "Specific conductance: ";
+        $show_sc_units = " \&micro;S/cm";
+        $sc_checked    = " selected";
+    } else {
+        $show_sc_type  = "Salinity: ";
+        $show_sc_units = " \&permil;";
+        $sal_checked   = " selected";
+    }
+
+#   For output, print a table that is similar to the one used by the main page,
+#   but without the javascript, and set up another table for the user to try again.
+
+    &header($fmt, $request_type);
+
+    print << "end_of_input";
+
+  <p>The computed oxygen solubility and percent saturation that you
+   requested is presented in the table below along with your inputs:</p>
+
+  <p><table border="0" cellspacing="0" cellpadding="3" bgcolor="#CCCCCC"><tr>
+  <td rowspan="5" bgcolor="#FFFFFF">&nbsp;&nbsp;&nbsp;</td>
+  <th align="left" colspan="3" bgcolor="#CC99FF">Inputs:</th>
+  <td rowspan="5" bgcolor="#FFFFFF">&nbsp;</td>
+  <th align="left" colspan="3" bgcolor="#CC99FF">Results:</th>
+  </tr><tr>
+
+  <td align="right">Water temperature: </td>
+  <td align="right">$wt_input</td>
+  <td>$show_wt_units</td>
+  <td align="right">Oxygen solubility: </td>
+  <td align="right">$sol</td>
+  <td> mg/L</td>
+  </tr><tr>
+
+  <td align="right">Barometric pressure: </td>
+  <td align="right">$bp_input</td>
+  <td>$show_bp_units</td>
+  <td align="right">&nbsp;Percent saturation: </td>
+  <td align="right">$psat</td>
+  <td> percent</td>
+  </tr><tr>
+
+  <td align="right">$show_sc_type</td>
+  <td align="right">$sc</td>
+  <td>$show_sc_units</td>
+  <td bgcolor="#FFFFFF">&nbsp;</td>
+  <td bgcolor="#FFFFFF">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</td>
+  <td bgcolor="#FFFFFF">&nbsp;</td>
+  </tr><tr>
+
+  <td align="right">[optional] Measured DO: </td>
+  <td align="right">$ox</td>
+  <td> mg/L</td>
+  <td colspan="3" bgcolor="#FFFFFF">&nbsp;</td>
+  </tr></table><br /></p>
+
+  <p>To compute another value of oxygen solubility and percent saturation,
+   modify your inputs in the form below and click the &quot;Submit&quot;
+   button.  You may input water temperature and barometric pressure in
+   a variety of units.  Similarly, you may choose to enter a value for
+   either specific conductance (in &micro;S/cm) or salinity (in &permil;).
+   Percent saturation is computed as the user-specified DO measurement
+   divided by the solubility, expressed as a percentage.</p>
+
+  <form method="POST" action="/cgi-bin/dotables">
+  <input type="hidden" name="request_type" value="single_value" />
+
+  <p><table border="0" cellspacing="0" cellpadding="3" bgcolor="#CCCCCC"><tr>
+  <td rowspan="6" bgcolor="#FFFFFF">&nbsp;&nbsp;&nbsp;</td>
+  <th align="left" colspan="3" bgcolor="#FFCCFF">Inputs:</th>
+  </tr><tr>
+
+  <td align="right">Water temperature: </td>
+  <td><input type="text" name="wt" value="$wt_input" size="6" /></td>
+  <td> <select size="1" name="wt_units">
+        <option value="degC"$degC_checked>degrees Celsius</option>
+        <option value="degF"$degF_checked>degrees Fahrenheit</option>
+      </select></td>
+  </tr><tr>
+
+  <td align="right">Barometric pressure: </td>
+  <td><input type="text" name="bp" value="$bp_input" size="6" /></td>
+  <td> <select size="1" name="bp_units">
+        <option value="mmHg"$mmHg_checked>mm Hg</option>
+        <option value="inHg"$inHg_checked>inches Hg</option>
+        <option value="mbar"$mbar_checked>millibars</option>
+        <option value="kPa"$kPa_checked>kiloPascals</option>
+        <option value="atm"$atm_checked>atmospheres</option>
+      </select></td>
+  </tr><tr>
+
+  <td align="right"><select size="1" name="sc_units">
+        <option value="sc"$sc_checked>Specific conductance</option>
+        <option value="sal"$sal_checked>Salinity</option>
+      </select></td>
+  <td><input type="text" name="sc" value="$sc" size="6" /></td>
+  <td> &micro;S/cm (SC) or &permil; (salinity)</td>
+  </tr><tr>
+
+  <td align="right">[optional] Measured DO: </td>
+  <td><input type="text" name="ox" value="$ox" size="6" /></td>
+  <td> mg/L</td>
+  </tr><tr>
+
+  <td align="right"><input type="submit" value="Submit" /></td>
+  <td align="left"><input type="reset" value="Reset" /></td>
+  <td>&nbsp;</td>
+  </tr></table><br /></p>
+  </form>
+
+end_of_input
+}
+
+
+#
+# If the request was to generate oxygen solubility tables,
+# then do that, print the output, and exit.  Handle the different output formats.
+#
+if ( $request_type eq "do_table" ) {
+
+#   Round some of the inputs appropriately.  Do this for ease of table generation.
+    $wt_min = int($wt_min * 100 + 0.0001)/100.;
+    $wt_inc = int($wt_inc * 100 + 0.0001)/100.;
+    $wt_max = int($wt_max * 100 + 0.0001)/100.;
+    $bp_min = int($bp_min * 100 + 0.0001)/100.;
+    $bp_inc = int($bp_inc * 100 + 0.0001)/100.;
+    $bp_max = int($bp_max * 100 + 0.0001)/100.;
+    $nrows  = int(($wt_max-$wt_min)/$wt_inc+0.0001)+1;  # number of data rows
+    $ncols  = int(($bp_max-$bp_min)/$bp_inc+0.0001)+1;  # number of data columns
+
+#   Make some unit-specific output strings.
+    if ( $wt_units eq "degC" ) {
+        $show_wt_units = "degrees Celsius";
+        $wt_unit_short = "deg C";
+    } else {
+        $show_wt_units = "degrees Fahrenheit";
+        $wt_unit_short = "deg F";
+    }
+    if ( $bp_units eq "mmHg" ) {
+        $show_bp_units = "millimeters of mercury";
+        $bp_unit_short = "mm Hg";
+    } elsif ( $bp_units eq "inHg" ) {
+        $show_bp_units = "inches of mercury";
+        $bp_unit_short = "in Hg";
+    } elsif ( $bp_units eq "mbar" ) {
+        $show_bp_units = "millibars";
+        $bp_unit_short = "mbar";
+    } elsif ( $bp_units eq "kPa" ) {
+        $show_bp_units = "kilopascals";
+        $bp_unit_short = "kPa";
+    } else {
+        $show_bp_units = "atmospheres";
+        $bp_unit_short = "atm";
+    }
+    if ( $sc_units eq "sc" ) {
+        $show_sc_type  = "specific conductance";
+        $show_sc_units = "microsiemens/cm";
+    } else {
+        $show_sc_type  = "salinity";
+        $show_sc_units = "permil";
+    }
+
+#   Print the header.
+    &header($fmt, $request_type);
+
+#   Begin the output with some header information.
+    if ($sc == 0) {
+        $out = "Solubility of oxygen in fresh water at various temperatures and pressures\n";
+    } else {
+        $out = "Solubility of oxygen in water at various temperatures and pressures and a "
+             . "$show_sc_type of $sc $show_sc_units\n";
+    }
+    $out .= "[Solubility shown in milligrams per liter."
+          . " Values based on published equations by Benson and Krause (1980 and 1984).\n"
+          . " $wt_unit_short, $show_wt_units; $bp_unit_short, $show_bp_units]";
+    &show_textrow($fmt, $out);
+
+    &begin_table($fmt);
+    &begin_row($fmt);
+    &show_hdr($fmt, "Temp.");
+    &show_hdr($fmt, "Barometric Pressure ($bp_unit_short)", $ncols);
+    &end_row($fmt);
+    &begin_row($fmt, "header");
+    &show_hdr($fmt, "($wt_unit_short)");
+
+#   Find a reasonable format
+    $ndec = 0;
+    if ( $bp_min != int($bp_min) || $bp_inc != int($bp_inc) ) {
+        $ndec = 1;
+        if ( 10*$bp_min != int(10*$bp_min) || 10*$bp_inc != int(10*$bp_inc) ) {
+            $ndec = 2;
+        }
+    }
+    for ($p=$bp_min; $p<=$bp_max+0.001; $p+=$bp_inc) {
+        $out = sprintf("%.${ndec}f", $p);
+        &show_hdr($fmt, $out);
+    }
+    &end_row($fmt);
+    &begin_body($fmt);
+
+#   Compute the salinity for all table calculations.
+    $sal = &sc2sal($sc, $sc_units);
+
+#   Compute and output the solubility table.
+    $ndec = 0;
+    if ( $wt_min != int($wt_min) || $wt_inc != int($wt_inc) ) {
+        $ndec = 1;
+        if ( 10*$wt_min != int(10*$wt_min) || 10*$wt_inc != int(10*$wt_inc) ) {
+            $ndec = 2;
+        }
+    }
+    $nr = 1;
+    for ($t=$wt_min; $t<=$wt_max+0.001; $t+=$wt_inc) {
+        if ( $nr == $nrows || $t + $wt_inc > $wt_max + 0.001 ) {
+            &begin_row($fmt, "lastLine");
+        } elsif ( $nr % 5 == 0 ) {
+            &begin_row($fmt, "thinLine");
+        } else {
+            &begin_row($fmt);
+        }
+        $out = sprintf("%.${ndec}f", $t);
+        &show_hdr($fmt, $out);
+
+        for ($p=$bp_min; $p<=$bp_max+0.001; $p+=$bp_inc) {
+            $wt  = &wt2degC($t, $wt_units);
+            $bp  = &bp2atm($p, $bp_units);
+            $sol = &compute_solubility($wt, $bp, $sal);
+            $sol = sprintf("%.${prec_do}f", $sol);
+            &show_cell($fmt, $sol);
+        }
+        &end_row($fmt);
+        $nr++;
+    }
+    &end_table($fmt);
+}
+
+
+#
+# If the request was to generate salinity correction tables,
+# then do that, print the output, and exit.  Handle the different output formats.
+#
+if ( $request_type eq "sf_table" ) {
+
+#   Round some of the inputs appropriately.  Do this for ease of table generation.
+    $wt_min = int($wt_min * 100 + 0.0001)/100.;
+    $wt_inc = int($wt_inc * 100 + 0.0001)/100.;
+    $wt_max = int($wt_max * 100 + 0.0001)/100.;
+    $sc_min = int($sc_min * 100 + 0.0001)/100.;
+    $sc_inc = int($sc_inc * 100 + 0.0001)/100.;
+    $sc_max = int($sc_max * 100 + 0.0001)/100.;
+    $nrows  = int(($wt_max-$wt_min)/$wt_inc+0.0001)+1;  # number of data rows
+    $ncols  = int(($sc_max-$sc_min)/$sc_inc+0.0001)+1;  # number of data columns
+
+#   Make some unit-specific output strings.
+    if ( $wt_units eq "degC" ) {
+        $show_wt_units = "degrees Celsius";
+        $wt_unit_short = "deg C";
+    } else {
+        $show_wt_units = "degrees Fahrenheit";
+        $wt_unit_short = "deg F";
+    }
+    if ( $sc_units eq "sc" ) {
+        $show_sc_type  = "specific conductance";
+        $show_sc_units = "microsiemens/cm";
+        $sc_unit_short = "uS/cm";
+    } else {
+        $show_sc_type  = "salinity";
+        $show_sc_units = "parts per thousand";
+        $sc_unit_short = "permil";
+    }
+
+#   Print the header.
+    &header($fmt, $request_type);
+
+#   Begin the output with some header information.
+    $out = "Salinity correction factors for dissolved oxygen in water based on $show_sc_type\n"
+         . "[Factors are dimensionless.  Values based on published equations by Benson and Krause (1984).\n"
+         . " $wt_unit_short, $show_wt_units; $sc_unit_short, $show_sc_units]";
+    &show_textrow($fmt, $out);
+
+    &begin_table($fmt);
+    &begin_row($fmt);
+    &show_hdr($fmt, "Temp.");
+    &show_hdr($fmt, ucfirst($show_sc_type) . " ($sc_unit_short)", $ncols);
+    &end_row($fmt);
+    &begin_row($fmt, "header");
+    &show_hdr($fmt, "($wt_unit_short)");
+
+#   Find a reasonable format
+    $ndec = 0;
+    if ( $sc_min != int($sc_min) || $sc_inc != int($sc_inc) ) {
+        $ndec = 1;
+        if ( 10*$sc_min != int(10*$sc_min) || 10*$sc_inc != int(10*$sc_inc) ) {
+            $ndec = 2;
+        }
+    }
+    for ($s=$sc_min; $s<=$sc_max+0.001; $s+=$sc_inc) {
+        $out = sprintf("%.${ndec}f", $s);
+        &show_hdr($fmt, &encomma($fmt, $out));
+    }
+    &end_row($fmt);
+    &begin_body($fmt);
+
+#   Compute and output the salinity correction factor table.
+    $ndec = 0;
+    if ( $wt_min != int($wt_min) || $wt_inc != int($wt_inc) ) {
+        $ndec = 1;
+        if ( 10*$wt_min != int(10*$wt_min) || 10*$wt_inc != int(10*$wt_inc) ) {
+            $ndec = 2;
+        }
+    }
+    $nr = 1;
+    for ($t=$wt_min; $t<=$wt_max+0.001; $t+=$wt_inc) {
+        if ( $nr == $nrows || $t + $wt_inc > $wt_max + 0.001 ) {
+            &begin_row($fmt, "lastLine");
+        } elsif ( $nr % 5 == 0 ) {
+            &begin_row($fmt, "thinLine");
+        } else {
+            &begin_row($fmt);
+        }
+        $out = sprintf("%.${ndec}f", $t);
+        &show_hdr($fmt, $out);
+
+        for ($s=$sc_min; $s<=$sc_max+0.001; $s+=$sc_inc) {
+            $wt  = &wt2degC($t, $wt_units);
+            $sal = &sc2sal($s, $sc_units);
+            $sf  = &compute_sfactor($wt, $sal);
+            $sf  = sprintf("%.${prec_sf}f", $sf);
+            &show_cell($fmt, $sf);
+        }
+        &end_row($fmt);
+        $nr++;
+    }
+    &end_table($fmt);
+}
+
+
+if ( $fmt eq "html" ) {
+    print "\n<p><a href=\"/software/DOTABLES/\">Return</a> to the DOTABLES main page.</p>\n\n";
+    &tail;
+}
+exit;
+
+
+
+#
+# Subroutines
+#
+
+# --------------------------------------------------------------------
+# Insert commas into a string (presumably a number)
+# --------------------------------------------------------------------
+sub encomma {
+    my ($fmt, $val) = @_;
+    my ($index, $len);
+
+    return $val if ( $fmt eq "csv" );
+
+    $val =~ s/\s+//g;
+    if ($val =~ /\./) { # if real, treat decimal as end of value
+        $len = index($val,'.');
+    } else {
+        $len = length($val);
+    }
+    if ($len > 3) { # numbers 1,000 or greater
+        $index = $len % 3 || 3;
+        while ($index < $len) {
+            substr($val, $index, 0) = ',';
+            $index += 4;
+        }
+    }
+    return $val;
+}
+
+
+# --------------------------------------------------------------------
+# Search a list for an exact match using a supplied string.
+# Return its ordinal, or -1 if not found.
+# --------------------------------------------------------------------
+sub list_match {
+    my ($s, @list) = @_;
+    my ($i);
+    for ($i=0; $i<=$#list; $i++) {
+        next if (! defined( $list[$i] ));
+        return $i if ($list[$i] eq $s);
+    }
+    return -1;
+}
+
+
+# --------------------------------------------------------------------
+# Get the current date and time.
+# --------------------------------------------------------------------
+sub get_datetime {
+    my($sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst);
+    my($month, $day, $timezone, $hhmm, $date_time);
+
+    ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+    if ( $hour < 10 ) { $hour = "0" . $hour; }
+    if ( $min  < 10 ) { $min  = "0" . $min; }
+    if ( $mday < 10 ) { $mday = "0" . $mday; }
+    $month = (Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec)[$mon];
+    $day   = (Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday)[$wday];
+    $year += 1900;
+    $timezone  = ( $isdst ) ? " EDT" : " EST";
+    $date_time = $day . ", " . $mday . "-" . $month . "-" . $year
+                      . ", " . $hour . ":" . $min . $timezone;
+    return $date_time;
+}
+
+
+# --------------------------------------------------------------------
+# Print code to begin a row.
+# --------------------------------------------------------------------
+sub begin_row {
+    my ($fmt, $class) = @_;
+
+    if ( $fmt eq "html" ) {
+        if ( defined( $class ) && $class =~ /[a-z]+/ ) {
+            print "<tr class=\"$class\">\n";
+        } else {
+            print "<tr>\n";
+        }
+    }
+}
+
+
+# --------------------------------------------------------------------
+# Print code to end a row.
+# --------------------------------------------------------------------
+sub end_row {
+    my ($fmt) = @_;
+
+    if ( $fmt eq "html" ) {
+        print "\n</tr>";
+    } else {
+        print "\n";
+    }
+}
+
+
+# --------------------------------------------------------------------
+# Print code to show a heading.
+# --------------------------------------------------------------------
+sub show_hdr {
+    my ($fmt, $text, $nc) = @_;
+
+    if ( $fmt eq "html" ) {
+        if ( defined( $nc ) && $nc > 1 ) {
+            print "<th colspan=\"$nc\">";
+        } else {
+            print "<th>";
+        }
+        $text =~ s/uS\/cm/\&micro;S\/cm/g;
+        $text =~ s/permil/\&permil;/g;
+        $text =~ s/deg C/\&deg;C/g;
+        $text =~ s/deg F/\&deg;F/g;
+    }
+    print $text;
+
+    if ( $fmt eq "html" ) {
+        print "</th>\n";
+    } elsif ( $fmt eq "csv" ) {
+        print ",";
+    } elsif ( $fmt eq "tab" ) {
+        print "\t";
+    }
+}
+
+
+# --------------------------------------------------------------------
+# Print code to show a table cell.
+# --------------------------------------------------------------------
+sub show_cell {
+    my ($fmt, $text) = @_;
+
+    print "<td>" if ( $fmt eq "html" );
+    print $text;
+    if ( $fmt eq "html" ) {
+        print "</td>\n";
+    } elsif ( $fmt eq "csv" ) {
+        print ",";
+    } elsif ( $fmt eq "tab" ) {
+        print "\t";
+    }
+}
+
+
+# --------------------------------------------------------------------
+# Print code to show a text row.
+# --------------------------------------------------------------------
+sub show_textrow {
+    my ($fmt, $text) = @_;
+
+    if ( $fmt eq "csv" ) {
+        $text =~ s/,/ -/g;
+    } elsif ( $fmt eq "html" ) {
+        $text =~ s/\n /\n\&nbsp;/g;
+        $text =~ s/\n/<br \/>\n/g;
+        $text =~ s/uS\/cm/\&micro;S\/cm/g;
+        $text =~ s/permil/\&permil;/g;
+        $text =~ s/deg C/\&deg;C/g;
+        $text =~ s/deg F/\&deg;F/g;
+        print "<p>";
+    }
+    print $text;
+    print "</p>\n" if ( $fmt eq "html" );
+    print "\n";
+}
+
+
+# --------------------------------------------------------------------
+# Print code to begin a table.
+# --------------------------------------------------------------------
+sub begin_table {
+    my ($fmt) = @_;
+    my ($dt);
+
+    if ( $fmt eq "html" ) {
+        print "<p><table class=\"data\" border=\"0\" cellspacing=\"0\"",
+              " cellpadding=\"4\" bgcolor=\"\#FFFFFF\">\n<thead>\n";
+    } else {
+        $dt = &get_datetime;
+        $dt =~ s/,//g if ( $fmt eq "csv" );
+        print "\nResults from DOTABLES program at https://water.usgs.gov/software/DOTABLES/.\n";
+        print "Table generated $dt\n\n";
+    }
+}
+
+
+# --------------------------------------------------------------------
+# Print code to transition between header and body of a table.
+# --------------------------------------------------------------------
+sub begin_body {
+    my ($fmt) = @_;
+
+    if ( $fmt eq "html" ) {
+        print "\n</thead>\n\n<tbody>\n";
+    }
+}
+
+
+# --------------------------------------------------------------------
+# Print code to end a table.
+# --------------------------------------------------------------------
+sub end_table {
+    my ($fmt) = @_;
+
+    if ( $fmt eq "html" ) {
+        print "</tbody></table></p>\n\n";
+    }
+}
+
+
+# --------------------------------------------------------------------
+# Convert water temperature to degrees Celsius, if necessary.
+#
+# Possible units are degrees C (degC) and degrees F (degF).
+# --------------------------------------------------------------------
+sub wt2degC {
+    my ($wt, $units) = @_;
+
+    if ( $units eq "degF" ) {
+        $wt = ($wt - 32) / 1.8;
+    }
+    return $wt;
+}
+
+
+# --------------------------------------------------------------------
+# Convert barometric pressure to atmospheres, if necessary.
+#
+# Possible units are mm Hg (mmHg), inches Hg (inHg), millibars (mbar),
+#  kiloPascals (kPa), and atmospheres (atm).
+# --------------------------------------------------------------------
+sub bp2atm {
+    my ($bp, $units) = @_;
+
+    if ( $units eq "mmHg" ) {
+        $bp /= 760.;
+    } elsif ( $units eq "inHg" ) {
+        $bp /= 29.9213;
+    } elsif ( $units eq "mbar" ) {
+        $bp /= 1013.25;
+    } elsif ( $units eq "kPa" ) {
+        $bp /= 101.325;
+    }
+    return $bp;
+}
+
+
+# --------------------------------------------------------------------
+# Convert specific conductance to salinity, if necessary.
+#
+# Uses an equation first mentioned but not well documented in Office of
+# Water Quality Technical Memorandum 81.11 and discussed in a bit more
+# detail in Office of Water Quality Technical Memorandum 2011.xx.
+#
+# The equation is:
+#    Salinity = 5.572E4 * SC + 2.02E9 * SC * SC
+# where SC is specific conductance in microsiemens per centimeter.
+#
+# Possible units are permil (sal) and microsiemens per centimeter (sc).
+# --------------------------------------------------------------------
+sub sc2sal {
+    my ($sc, $units) = @_;
+    my ($sal);
+
+    $sal = $sc;
+    if ( $units eq "sc" ) {
+        $sal = 5.572E-4 * $sc + 2.02E-9 * $sc * $sc;
+    }
+    return $sal;
+}
+
+
+# --------------------------------------------------------------------
+# Calculate oxygen solubility.
+#
+# The dissolved oxygen solubility in water is calculated in mg/L as a
+# function of water temperature, barometric pressure, and salinity.
+#
+# Sources:
+# - USGS Office of Water Quality Tech Memo 2011.03
+# - Benson, B.B., and Daniel Krause, Jr, 1980, The concentration and isotopic
+#      fractionation of gases dissolved in freshwater in equilibrium with
+#      the atmosphere. 1. Oxygen: Limnology and Oceanography, vol. 25,
+#      no. 4, p. 662-671.
+#      (Also available at https://www.jstor.org/stable/pdfplus/2835754.pdf.)
+# - Benson, B.B., and Daniel Krause, Jr, 1984, The concentration and isotopic
+#      fractionation of oxygen dissolved in freshwater and seawater in
+#      equilibrium with the atmosphere: Limnology and Oceanography,
+#      vol. 29, no. 3, p. 620-632.
+#      (Also available at https://www.jstor.org/stable/pdfplus/2836308.pdf.)
+#
+# Input variables:
+#   $t     is temperature in degrees Celsius
+#   $bp    is barometric pressure in atm
+#   $sal   is salinity in permil (parts per thousand)
+#
+# Other variables:
+#   $sat   is the saturation concentration in mg/L
+#   $u     is the vapor pressure of water (atm)
+#   $theta is related to the 2nd virial coefficient of oxygen
+#   $tk    is temperature in Kelvin
+# --------------------------------------------------------------------
+sub compute_solubility {
+    my ($t, $bp, $sal) = @_;
+    my ($tk, $sat, $u, $theta);
+
+#   Compute temperature in Kelvin
+    $tk  = $t + 273.15;
+
+#   Compute oxygen solubility in fresh water at 1 atm and input temp
+    $sat = exp(-139.34411 +(1.575701E5 +(-6.642308E7
+               +(1.2438E10 -8.621949E11/$tk)/$tk)/$tk)/$tk);
+
+#   Pressure correction
+    if ( $bp != 1.0 ) {
+        $u     = exp(11.8571 +(-3840.70 -216961/$tk)/$tk);
+        $theta = 0.000975 -1.426E-5 * $t +6.436E-8 * $t * $t;
+        $sat  *= ($bp - $u)*(1 - $theta * $bp)/((1 - $u)*(1 - $theta));
+    }
+
+#   Salinity correction
+    if ( $sal > 0.0 ) {
+        $sat *= exp(-1 * $sal * (0.017674 +(-10.754 +2140.7/$tk)/$tk));
+    }
+    return $sat;
+}
+
+
+# --------------------------------------------------------------------
+# Calculate salinity correction factor.
+#
+# Sources:
+# - USGS Office of Water Quality Tech Memo 2011.03
+# - Benson, B.B., and Daniel Krause, Jr, 1980, The concentration and isotopic
+#      fractionation of gases dissolved in freshwater in equilibrium with
+#      the atmosphere. 1. Oxygen: Limnology and Oceanography, vol. 25,
+#      no. 4, p. 662-671.
+#      (Also available at https://www.jstor.org/stable/pdfplus/2835754.pdf.)
+# - Benson, B.B., and Daniel Krause, Jr, 1984, The concentration and isotopic
+#      fractionation of oxygen dissolved in freshwater and seawater in
+#      equilibrium with the atmosphere: Limnology and Oceanography,
+#      vol. 29, no. 3, p. 620-632.
+#      (Also available at https://www.jstor.org/stable/pdfplus/2836308.pdf.)
+#
+# Input variables:
+#   $t   is temperature in degrees Celsius
+#   $sal is salinity in permil (parts per thousand)
+#
+# Other variables:
+#   $tk  is temperature in Kelvin
+#   $sf  is the salinity correction factor (dimensionless)
+# --------------------------------------------------------------------
+sub compute_sfactor {
+    my ($t, $sal) = @_;
+    my ($tk, $sf);
+
+#   Compute temperature in Kelvin
+    $tk  = $t + 273.15;
+
+#   Salinity correction
+    $sf = exp(-1 * $sal * (0.017674 +(-10.754 +2140.7/$tk)/$tk));
+    return $sf;
+}
+
+
+# --------------------------------------------------------------------
+# Exit gracefully.
+# --------------------------------------------------------------------
+sub exit_gracefully {
+    my($type, $msg1, $msg2) = @_;
+
+    $type = "do_table" if ( ! defined( $type ));
+    if ( ! defined( $msg1 )) {
+        $msg1 = "A problem occurred and the server could not fulfill your request.";
+    }
+    if ( ! defined( $msg2 )) {
+        $msg2 = "Please check your input and try again, or\n"
+              . "<a href=\"https://answers.usgs.gov/\">"
+              . "notify us</a> of the problem.\n"
+              . "Thank you.";
+    }
+    &header("html", $type) if ( ! $header_done );
+    print << "end_of_input";
+
+<p><span class=red>$msg1</span>
+$msg2</p>
+
+<p><a href="/software/DOTABLES/">Return</a> to the DOTABLES main page.</p>
+
+end_of_input
+
+    &tail;
+    exit;
+}
+
+
+# --------------------------------------------------------------------
+# Make a valid HTML tail.
+# --------------------------------------------------------------------
+sub tail {
+    my($text, $parsed_text);
+
+    print "<p>\&nbsp;</p>\n\n";
+    $text = &UrlToString("$DocumentRoot/inc/footer.html");
+    $parsed_text = &ParseTemplate($text);
+    print $parsed_text;
+
+    print "</body></html>";
+}
+
+
+# --------------------------------------------------------------------
+# Print the HTML header.
+# --------------------------------------------------------------------
+sub header {
+    my ($fmt, $req_type) = @_;
+    my ($doc_title, $h2_heading);
+
+    if ( $fmt eq "csv" && $req_type ne "single_value" ) {
+        print "Content-type: text/csv\n";
+        print "Content-disposition: attachment; filename=dotables.csv\n\n";
+
+    } elsif ( $fmt eq "tab" && $req_type ne "single_value" ) {
+        print "Content-type: text/tab-separated-values\n";
+        print "Content-disposition: attachment; filename=dotables.txt\n\n";
+
+    } else {
+        if ( $req_type eq "single_value" ) {
+            $doc_title  = "DOTABLES Single-Value Computation Result";
+            $h2_heading = "Single-Value Computation";
+        } elsif ( $req_type eq "do_table" ) {
+            $doc_title  = "DOTABLES Oxygen Solubility Table Result";
+            $h2_heading = "Oxygen Solubility Table";
+        } elsif ( $req_type eq "sf_table" ) {
+            $doc_title  = "DOTABLES Salinity Correction Factor Table Result";
+            $h2_heading = "Salinity Correction Factor Table";
+        }
+
+        print "Content-type: text/html\n\n";
+        print <<"end_of_input";
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en">
+<head>
+  <title>$doc_title</title>
+
+  <link href="/style/common.css"      rel="stylesheet" type="text/css" />
+  <link href="/style/custom.css"      rel="stylesheet" type="text/css" />
+  <link href="/style/styles.css"      rel="stylesheet" type="text/css" />
+  <link href="/style/body.css"        rel="stylesheet" type="text/css" />
+  <link href="/software/software.css" rel="stylesheet" type="text/css" />
+
+  <meta name="description" content="DOTABLES result" />
+  <meta name="keywords" content="oxygen, dissolved oxygen, solubility, dotables" />
+  <meta name="publisher" content="USGS - U.S. Geological Survey" />
+  <meta name="abstract" content="Interactive creation of tables showing
+   the solubility of oxygen in water as a function of water temperature,
+   barometric pressure, and salinity" />
+  <meta name="version" content="3.6" />
+  <meta name="os" content="online" />
+  <meta name="category" content="geochemical" />
+  <meta name="lastupdated" content="2018/08/27" />
+
+  <style type="text/css">
+    strong                            { font-weight: bold }
+    th                                { white-space: nowrap }
+    td                                { white-space: nowrap }
+    span.red                          { color: red }
+    table.data thead tr:first-child * { border-top:    2px solid black; border-bottom: none; text-align: center }
+    table.data thead tr.header *      { border-bottom: 2px solid black }
+    table.data tr th:first-child      { border-right:  1px solid #999999; text-align: right }
+    table.data tr td                  { text-align: right }
+    table.data tr.thinLine *          { border-bottom: 1px solid #666666 }
+    table.data tr.lastLine *          { border-bottom: 2px solid black }
+    table.data thead                  { display: table-header-group }
+    table.data tbody                  { display: table-row-group }
+  </style>
+
+end_of_input
+
+        print &ParseTemplate(&UrlToString("/afs/usgs.gov/www/SSI/google_analytics_head.html"));
+        print "</head>\n\n<body>\n\n";
+        print &UrlToString("$DocumentRoot/inc/header.html");
+        print "<h2>DOTABLES Result</h2>\n\n";
+        print "<h3>$h2_heading</h3>\n\n";
+    }
+    $header_done = 1;
+}
+
+
+# --------------------------------------------------------------------
+# Filter out <script> commands and translate some chars.
+# --------------------------------------------------------------------
+sub CleanVar {
+  my ($v) = @_;
+  $v =~ s/%([a-fA-F0-9][a-fA-F0-9])/pack("C", hex($1))/eg;
+  $v =~ s#<script>.*</script>##ig;
+  $v =~ s#<script.*?>.*</script>##ig;
+  $v =~ s#<.*?script>.*</script>##ig;
+  $v =~ s#<.*?script.*?>.*</script>##ig;
+  $v =~ s#<script>.*##ig;
+  $v =~ s#<script.*?>.*##ig;
+  $v =~ s#<.*?script>.*##ig;
+  $v =~ s#<.*?script.*?>.*##ig;
+  $v =~ s#javascript:.*##ig;
+  $v =~ s#.*onmouseover.*##ig;
+  $v =~ s/\&/\&\#38\;/g;           # Translate "&"
+  $v =~ s/^\#/\&\#35\;/g;          # Translate "#"
+  $v =~ s/([^\&])\#/$1\&\#35\;/g;  # Translate "#"
+  $v =~ s/\(/\&\#40\;/g;           # Translate "("
+  $v =~ s/\)/\&\#41\;/g;           # Translate ")"
+  $v =~ s/</\&lt\;/g;              # Translate "<"
+  $v =~ s/>/\&gt\;/g;              # Translate ">"
+  $v =~ /(.*)/;                    # create untainted variable, $1
+  return $1;
+}
+
+
+# --------------------------------------------------------------------
+# Set some global and environment variables that might be used later
+# --------------------------------------------------------------------
+sub EnvSettings {
+    local (@monstr);
+    local ($sec, $minute, $hour, $day, $month, $year);
+
+    # -- lookup table for month numbers to names
+    @monstr = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',);
+      
+    $DocumentRoot = $ENV{'DOCUMENT_ROOT'};
+    $Timefmt      = '%A, %e-%b-%Y at %T %Z';
+    $TIMEZONE     = 'EST';
+    $TIMEZONE     =~ s/(.)S(.)/$1D$2/ if (localtime($^T))[8];
+
+    $Env_Path_Translated = $ENV{'PATH_TRANSLATED'};
+    $Env_Script_Filename = $ENV{'SCRIPT_FILENAME'};
+    $ENV{'DOCUMENT_URI'} = &CleanVar($ENV{'REQUEST_URI'});
+
+    if (! $Env_Path_Translated) {
+        if ($Env_Script_Filename) {
+            $Env_Path_Translated = $Env_Script_Filename;
+        } elsif ($ENV{'DOCUMENT_URI'} =~ /cgi-bin/) {
+            ($Env_Path_Translated = $DocumentRoot) =~ s/hdtocs$/$ENV{'DOCUMENT_URI'}/;
+            $Env_Path_Translated =~ s/\?.*$//;
+        } else {
+            $Env_Path_Translated = $DocumentRoot . $ENV{'DOCUMENT_URI'};
+            $Env_Path_Translated =~ s/\?.*$//;
+        }
+        $ENV{'PATH_TRANSLATED'} = $Env_Path_Translated;
+    }
+    ($ENV{'DOCUMENT_NAME'} = $Env_Path_Translated) =~ s#^.*/##;
+    $ENV{'LAST_MODIFIED'}  = &GetDTM($Env_Path_Translated);
+
+    ($day, $month, $year) = (gmtime($^T))[3,4,5];
+    $year += 1900;
+    $day   = "0$day" if ($day < 10);
+    $ENV{'DATE_GMT'} = "$day $monstr[$month] $year";
+
+    ($sec, $minute, $hour, $day, $month, $year) = (localtime($^T))[0,1,2,3,4,5];
+    $year  += 1900;
+    $day    = "0$day"    if ($day < 10);
+    $sec    = "0$sec"    if ($sec < 10);
+    $minute = "0$minute" if ($minute < 10);
+    $ENV{'DATE_LOCAL'}     = "$day $monstr[$month] $year";
+    $ENV{'DATETIME_LOCAL'} = "$day $monstr[$month] $hour:$minute:$sec $TIMEZONE $year";
+
+    return;
+}
+
+
+# --------------------------------------------------------------------
+# Find full path of a file
+# --------------------------------------------------------------------
+sub FullPath {
+  local ($file,$type) = @_;
+  local ($basedir);
+
+  return "" unless $file;
+  return $file if ($file =~ /^$DocumentRoot/ && $type ne 'virtual');
+  if ($file =~ /^\/SSI\// && $type eq 'virtual') {
+      return "/afs/usgs.gov/www/$file";
+  }
+  return "$DocumentRoot/$file" if ($file =~ /^\// && $type eq 'virtual');
+
+  # concatenate base directory with given directory, and simplify
+  ($basedir = $Env_Path_Translated) =~ s/[^\/]+$//;
+  while ($file =~ s/^\.\.\///) {
+    $basedir =~ s/[^\/]+\/$//;
+  }
+  $file =~ s/\.\///;
+  $file = $basedir . $file;
+  $file =~ s#//#/#g;
+  return $file;
+}
+
+
+# --------------------------------------------------------------------
+# Finds day and time a file was modified
+# --------------------------------------------------------------------
+sub GetDTM {
+  local ($file) = $_[0];
+  local (@filestats);
+  local ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst);
+
+  if ($file && -e $file) {
+    (@filestats) = stat($file);
+    ($sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst)
+      = localtime($filestats[9]);
+  } else {
+    ($sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst)
+      = localtime($^T);
+  }
+  return &strftime($Timefmt, $sec, $min, $hour, $mday, $mon,
+                   $year, $wday, $yday, $isdst);
+}
+
+
+# --------------------------------------------------------------------
+# Finds size of a file
+# --------------------------------------------------------------------
+sub GetSize {
+  local ($file) = $_[0];
+  local ($size);
+
+  if ($file && -e $file) {
+    #$size = (stat($file))[7];
+    $size = -s $file;
+  } else {
+    $size = 0;
+  }
+  if ($Sizefmt eq 'abbrev') {  # can be set by "config" SSI directive
+    if ($size >= 1_000_000) {
+        $size /= 1_000_000;
+        $size = int($size + 0.5);
+        $size .= ' Mb';
+    } elsif ($size >= 1000) {
+        $size /= 1000;
+        $size = int($size + 0.5);
+        $size .= ' Kb';
+    }
+  }
+  return $size;
+}
+
+
+# --------------------------------------------------------------------
+# Get contents of a file
+# --------------------------------------------------------------------
+sub IncludeFile {
+  local ($file) = $_[0];
+  local ($text);
+
+  $text = &UrlToString($file);
+  $text = &ParseTemplate($text);
+  return $text;
+}
+
+
+# --------------------------------------------------------------------
+# Reads a file and returns it as one string.
+# --------------------------------------------------------------------
+sub UrlToString {
+  local ($file) = $_[0];
+  local (*URLTOSTRING,$text);
+  local ($/);  # we will read files in one slurp
+
+  open (URLTOSTRING,"<$file") || return "";
+  $text = <URLTOSTRING>;
+  close (URLTOSTRING);
+  return $text;
+}
+
+
+# --------------------------------------------------------------------
+# Read text and interpret selected commands
+# --------------------------------------------------------------------
+sub ParseTemplate {
+  local ($text) = $_[0];
+  local (@tagline);
+  local ($line, $key, $value, $textout);
+  local ($expr, $arg, $if_nest_level, @if_test, $i, $if_keep_test);
+
+  return $text unless ($text =~ /<!--/);
+
+  $if_nest_level = 0;
+  @if_test       = ();
+  $if_test[0]    = 'keep';
+
+  # Discard a line that is troublesome for this application
+  $text =~ s/Page Contact Information: <!-- *\#echo *encoding *=\"none\" *var *= *\"Maintainer\" *--><br>//i;
+
+  $text =~ s/^[\s\n]*//; #Get rid of leading whitespace
+  @tagline = split('<',$text);
+
+  foreach $line (@tagline) {
+      next unless ($line);
+      $line = "<$line";
+
+      # Discard lines that are not interpreted here
+      $line =~ s/^<!-- *\#set +var *= *\"[^\"]+\" +value *= *\"[^\"]+\" *-->//;
+
+      # Check for Apache SSI - if/elsif/else/endif
+      # Only checking for REMOTE_HOST, such as:  <!--#if expr="${REMOTE_HOST} = /.usgs.gov$/" -->
+      if ($line =~ s/^(<!-- *\#if +expr *= *\")([^\"]+)\" *-->//) {
+          $if_nest_level++;
+          $expr = $2;
+          if ($expr =~ /^ *\${REMOTE_HOST} *(!)? *= *([^ ]+) *$/) {
+              $arg = $2;
+              $arg =~ s/\///g;
+              if ($ENV{'REMOTE_HOST'} eq $arg || $ENV{'REMOTE_HOST'} =~ /$arg/) {
+                  $if_test[$if_nest_level] = 'keep';
+                  $if_test[$if_nest_level] = 'skip' if ($1 eq '!');
+              } else {
+                  $if_test[$if_nest_level] = 'skip';
+                  $if_test[$if_nest_level] = 'keep' if ($1 eq '!');
+              }
+          } elsif ($expr =~ /^\$Maintainer$/) {
+              $if_test[$if_nest_level] = 'skip';
+          } else {
+              $if_test[$if_nest_level] = 'keep';
+          }
+      } elsif ($line =~ s/^(<!-- *\#elsif +expr *= *\")([^\"]+)\" *-->//) {
+          if ($if_test[$if_nest_level] eq 'keep') {
+              $if_test[$if_nest_level] = 'skip';
+          } else {
+              $expr = $2;
+              if ($expr =~ /^ *\${REMOTE_HOST} *(!)? *= *([^ ]+) *$/) {
+                  $arg = $2;
+                  $arg =~ s/\///g;
+                  if ($ENV{'REMOTE_HOST'} eq $arg || $ENV{'REMOTE_HOST'} =~ /$arg/) {
+                      $if_test[$if_nest_level] = 'keep';
+                      $if_test[$if_nest_level] = 'skip' if ($1 eq '!');
+                  } else {
+                      $if_test[$if_nest_level] = 'skip';
+                      $if_test[$if_nest_level] = 'keep' if ($1 eq '!');
+                  }
+              } elsif ($expr =~ /^\$Maintainer$/) {
+                  $if_test[$if_nest_level] = 'skip';
+              } else {
+                  $if_test[$if_nest_level] = 'keep';
+              }
+          }
+      } elsif ($line =~ s/^<!-- *\#else *-->//) {
+          if ($if_test[$if_nest_level] eq 'skip') {
+              $if_test[$if_nest_level] = 'keep';
+          } else {
+              $if_test[$if_nest_level] = 'skip';
+          }
+      } elsif ($line =~ s/^<!-- *\#endif *-->//) {
+          $if_nest_level--;
+          $if_nest_level = 0 if ($if_nest_level < 0);
+      }
+      $if_keep_test = 1;
+      for ($i=1; $i<=$if_nest_level; $i++) {
+          if ($if_test[$i] eq 'skip') {
+              $if_keep_test = 0;
+              last;
+          }
+      }
+
+      # Check for other Apache SSI commands
+      if ($line =~ s/^(<!-- *\#config +(\w+) *= *\")([^\"]+)\" *-->//) {
+          if ($2 eq 'errmsg') {   # not implemented yet
+          } elsif ($2 eq 'sizefmt') {
+              $Sizefmt = $3;      # set global VAR
+          } elsif ($2 eq 'timefmt') {
+              $Timefmt = $3;      # set global VAR
+              $ENV{'LAST_MODIFIED'} = &GetDTM($Env_Path_Translated);  # reset
+          }
+
+      } elsif ($line =~ s/^(<!-- *\#include +(\w+) *= *\")([^\"]+)\" *-->//) {
+          # $2 eq 'file' or 'virtual'
+          $line = &IncludeFile(&FullPath($3,$2)) . $line;
+
+      } elsif ($line =~ s/^(<!-- *\#echo +var *= *\")([^\"]+)\" *-->//) {
+          if ($2 eq "PATH") {
+              $line = $ENV{'DOCUMENT_URI'} . $line;
+          } else {
+              $line = $ENV{$2} . $line;
+          }
+
+      } elsif ($line =~ s/^(<!-- *\#flastmod +(\w+) *= *\")([^\"]+)\" *-->//) {
+          # $2 eq 'file' or 'virtual'
+          $line = &GetDTM(&FullPath($3,$2)) . $line;
+
+      } elsif ($line =~ s/^(<!-- *\#fsize +(\w+) *= *\")([^\"]+)\" *-->//) {
+          # $2 eq 'file' or 'virtual'
+          $line = &GetSize(&FullPath($3,$2)) . $line;
+
+      } elsif ($line =~ s/^<!-- *\#printenv *-->//) {
+          while (($key, $value) = each %ENV) {
+              $line = "$key=$value\n" . $line;
+          }
+      }
+
+      # Check to see if this line will be output.
+      $textout .= $line if ( $if_keep_test );
+  }
+  return $textout;
+}
+
+
+# --------------------------------------------------------------------
+# A rather wimpy, but hopefully passable EST USA strftime counterfit
+# --------------------------------------------------------------------
+sub strftime {
+    local ($Timefmt, $sec, $min, $hour, $mday, $mon,
+           $year, $wday, $yday, $isdst) = @_;
+    local (@fulldaystr) = ('Sunday', 'Monday', 'Tuesday', 'Wednesday', 
+                           'Thursday', 'Friday', 'Saturday');
+    local (@daystr) = ('Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat');
+    local (@monstr) = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
+    local (@fullmonstr) = ('January', 'February', 'March', 'April', 
+                           'May', 'June', 'July', 'August', 
+                           'September', 'October', 'November', 'December');
+    local (%strf, $TZ);
+    local ($hr) = $hour % 12;  # AM-PM hour;
+    local ($mn) = $mon + 1;    # digital month of year
+    local ($yr) = $year;       # 4 digit year
+    local ($yrday) = sprintf('%3.3d', $yday + 1);  # how many days in year so far
+
+    $sec   = "0$sec"  if $sec < 10;
+    $min   = "0$min"  if $min < 10;
+    $hr    = $hour % 12;            # AM-PM hour
+    $hour  = "0$hour" if $hour < 10;
+    $mday  = "0$mday" if $mday < 10;
+    $mn    = "0$mn"   if $mn < 10;
+    $year -= 100      if ($year < 1000 && $year > 99);  # 2-digit years after 2000
+    $year  = "0$year" if $year < 10;
+    if ($yr < 1000) {
+        $yr = $yr >= 80 ? 1900 + $yr : 2000 + $yr;  # 4-digit years
+    }
+    $TZ = $TIMEZONE;
+    $TZ =~ s/(.)S(.)/$1D$2/ if ($isdst);
+    $TZ =~ s/(.)D(.)/$1S$2/ if (! $isdst);
+
+    $strf{'%a'} = $daystr[$wday];
+    $strf{'%A'} = $fulldaystr[$wday];
+    $strf{'%b'} = $monstr[$mon];
+    $strf{'%B'} = $fullmonstr[$mon];
+    $strf{'%c'} = "$daystr[$wday] $monstr[$mon] $mday $hour:$min:$sec $yr";
+    $strf{'%D'} = "$mn/$mday/$year";
+    $strf{'%d'} = $mday;
+   ($strf{'%e'} = $mday) =~ s/^0//;
+    $strf{'%H'} = $hour;
+    $strf{'%h'} = $monstr[$mon];
+    $strf{'%I'} = $hr < 10 ? "0$hr" : $hr;
+    $strf{'%j'} = $yrday;
+    $strf{'%m'} = $mn;
+    $strf{'%M'} = $min;
+    $strf{'%n'} = "\n";
+    $strf{'%p'} = $hour <= 12 ? 'AM' : 'PM';
+    $strf{'%R'} = "$hour:$min";
+    $strf{'%r'} = "$strf{'%I'}:$min:$sec $strf{'%p'}";
+    $strf{'%S'} = $sec;
+    $strf{'%T'} = "$hour:$min:$sec";
+    $strf{'%U'} = int(($yday + (7 - $wday))/ 7);
+    $strf{'%U'} = "0$strf{'%U'}"  if $strf{'%U'} < 10;
+    $strf{'%W'} = $wday == 0 ? $strf{'%U'} - 1 :  $strf{'%U'};
+    $strf{'%W'} = "0$strf{'%W'}"  if length($strf{'%W'}) == 1;
+    $strf{'%w'} = $wday;
+    $strf{'%x'} = "$mn/$mday/$year";
+    $strf{'%X'} = "$mday $hour:$min:$sec";
+    $strf{'%y'} = $year;
+    $strf{'%Y'} = $yr;
+    $strf{'%Z'} = $TZ;
+    $strf{'%%'} = '%';
+
+    while ($Timefmt =~ s/(%[aAbBcdeDHhIjmMnprRSTUWwxXyYZ%])/$strf{$1}/) {}
+    return $Timefmt;
+}
